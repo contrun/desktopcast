@@ -19,4 +19,4 @@ num_cpus = "1"
 
 gst-retimestamp = { path = "lib/gst_retimestamp" }
 
-upnp-client = { git = "https://github.com/seijikun/upnp-client-rs.git", rev = "b4859dc1190fffac39b9fe22d2d8d0fd1b959b5b" }
+upnp-client = "^0.1.9"

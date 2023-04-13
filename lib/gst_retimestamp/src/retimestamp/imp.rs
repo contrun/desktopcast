@@ -1,5 +1,3 @@
-use std::borrow::BorrowMut;
-
 use gst::glib;
 use gst::prelude::*;
 use gst::subclass::prelude::*;

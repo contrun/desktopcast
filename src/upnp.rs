@@ -16,7 +16,7 @@ async fn try_start_on_device(media_url: &str, load_options: LoadOptions, device:
         .is_some();
 
     if supports_render_control {
-        let device_client = DeviceClient::new(&device.location).connect().await?;
+        let device_client = DeviceClient::new(&device.location)?.connect().await?;
         let media_renderer = MediaRendererClient::new(device_client);
 
         println!("Sending UPNP/DLNA Control to: {}", device.friendly_name);
