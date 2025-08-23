@@ -1,4 +1,4 @@
-use std::{time::Duration, collections::HashSet};
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -9,8 +9,13 @@ use upnp_client::{
     types::{Device, LoadOptions, Metadata, ObjectClass},
 };
 
-async fn try_start_on_device(media_url: &str, load_options: LoadOptions, device: Device) -> Result<()> {
-    let supports_render_control = device.services
+async fn try_start_on_device(
+    media_url: &str,
+    load_options: LoadOptions,
+    device: Device,
+) -> Result<()> {
+    let supports_render_control = device
+        .services
         .iter()
         .find(|s| s.service_id == "urn:upnp-org:serviceId:RenderingControl")
         .is_some();
@@ -47,6 +52,7 @@ pub async fn start_via_upnp(media_url: &str) -> Result<()> {
         tokio::pin!(device_stream);
         while let Some(device) = device_stream.next().await {
             if !seen_devices.contains(&device.location) {
+                println!("Found: {}", device.location);
                 seen_devices.insert(device.location.clone());
                 let _ = try_start_on_device(media_url, options.clone(), device).await;
             }

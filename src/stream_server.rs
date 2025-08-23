@@ -1,13 +1,16 @@
-use std::thread::{self, JoinHandle};
+use std::{
+    sync::Mutex,
+    thread::{self, JoinHandle},
+};
 
 use anyhow::{anyhow, Result};
-use ashpd::{
-    desktop::screencast::{CursorMode, PersistMode, Screencast, SourceType},
-    WindowIdentifier,
+use ashpd::desktop::{
+    screencast::{CursorMode, Screencast, SourceType},
+    PersistMode,
 };
 use gst::{glib, prelude::*, ClockTime, MessageView};
 use gst_rtsp_server::prelude::*;
-use gstreamer as gst;
+use gstreamer::{self as gst, glib::ControlFlow};
 use gstreamer_rtsp_server as gst_rtsp_server;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::*;
@@ -30,10 +33,7 @@ impl VideoSourceHelper {
             )
             .await?;
 
-        let response = proxy
-            .start(&session, &WindowIdentifier::default())
-            .await?
-            .response()?;
+        let response = proxy.start(&session, None).await?.response()?;
 
         response.streams().iter().for_each(|stream| {
             println!("node id: {}", stream.pipe_wire_node_id());
@@ -80,7 +80,10 @@ impl VideoSourceHelper {
         // then try x11 primary monitor
         // then fall back to x11 entire screen
         if let Ok(pipewire_id) = VideoSourceHelper::get_pipewire_stream_id().await {
-            Ok(format!("pipewiresrc do-timestamp=true keepalive-time=100 path={} ! retimestamp", pipewire_id))
+            Ok(format!(
+                "pipewiresrc keepalive-time=100 path={} ! retimestamp",
+                pipewire_id
+            ))
         } else if let Ok(ximagesrc_args) = VideoSourceHelper::get_x11_options() {
             Ok(format!("ximagesrc {}", ximagesrc_args))
         } else {
@@ -117,14 +120,14 @@ impl AudioSourceHelper {
 
         let pulse_device = sound_monitor.property::<String>("internal-name");
 
-        Ok(format!("pulsesrc do-timestamp=true device={}", pulse_device))
+        Ok(format!("pulsesrc device={} ! retimestamp", pulse_device))
     }
 }
 
 pub struct StreamServer {
     main_loop: glib::MainLoop,
     server: gst_rtsp_server::RTSPServer,
-    worker_thread: Option<JoinHandle<()>>
+    worker_thread: Option<JoinHandle<()>>,
 }
 impl StreamServer {
     pub fn new() -> Self {
@@ -132,7 +135,11 @@ impl StreamServer {
         let server = gst_rtsp_server::RTSPServer::new();
         server.set_backlog(1);
 
-        Self { main_loop, server, worker_thread: None }
+        Self {
+            main_loop,
+            server,
+            worker_thread: None,
+        }
     }
 
     pub async fn start(&mut self, config: &DesktopCastConfig) -> Result<()> {
@@ -149,9 +156,9 @@ impl StreamServer {
         let video_source = VideoSourceHelper::get_gst_videosource_launch().await?;
         let audio_source = AudioSourceHelper::get_gst_audiosource_launch().await?;
 
-        let mut pipeline_str = "".to_owned();
+        let mut pipeline_str = "multiqueue name=outqueue".to_owned();
         // VIDEO
-        pipeline_str += &format!(" {} ! queue", video_source);
+        pipeline_str += &format!(" {} ! queue max-size-time=250000000 leaky=2", video_source);
         if let Some(rescale_res) = &config.target_resolution {
             pipeline_str += &format!(
                 " ! videoscale n-threads={} ! video/x-raw,width={},height={}",
@@ -159,47 +166,39 @@ impl StreamServer {
             );
         }
         pipeline_str += &format!(
-            " ! videoconvert ! queue leaky=2 ! x264enc threads={} tune=zerolatency speed-preset=2 bframes=0 ! video/x-h264,profile=high ! queue ! rtph264pay name=pay0 pt=96",
+            " ! videoconvert ! queue max-size-time=250000000 ! x264enc threads={} tune=zerolatency speed-preset=3 bframes=0 pass=qual quantizer=24 ! video/x-h264,profile=high ! outqueue. outqueue. ! rtph264pay name=pay0 pt=96",
             nproc
         );
         // AUDIO
-        pipeline_str += &format!(" {} ! queue ! audioconvert ! audioresample ! queue leaky=2 ! vorbisenc ! queue ! rtpvorbispay name=pay1 pt=97", audio_source);
+        pipeline_str += &format!(" {} ! queue max-size-time=250000000 leaky=2 ! audioconvert ! audioresample ! queue max-size-time=250000000 ! vorbisenc ! outqueue. outqueue. ! rtpvorbispay name=pay1 pt=97", audio_source);
 
         factory.set_launch(&format!("( {} )", pipeline_str));
         factory.set_shared(true);
-        factory.set_latency(1500);
-        factory.set_retransmission_time(ClockTime::from_mseconds(2500));
+        factory.set_latency(0);
+        factory.set_retransmission_time(ClockTime::from_mseconds(100));
         factory.set_stop_on_disconnect(true);
 
         factory.connect_media_constructed({
             let main_loop = self.main_loop.clone();
+            // do not judge me. The add_watch() returning a guard is super dumb and annoying here
+            let bus_watches = Mutex::new(Vec::new());
             move |_, media| {
                 let bus = media.element().bus().unwrap();
-                bus.add_watch({
-                    let main_loop = main_loop.clone();
-                    move |_, msg| {
-                        if let MessageView::Error(err) = msg.view() {
-                            eprintln!("Pipeline failed:\n{:?}", err);
-                            main_loop.quit();
-                            Continue(false)
-                        } else {
-                            Continue(true)
+                let bus_watch = bus
+                    .add_watch({
+                        let main_loop = main_loop.clone();
+                        move |_, msg| {
+                            if let MessageView::Error(err) = msg.view() {
+                                eprintln!("Pipeline failed:\n{:?}", err);
+                                main_loop.quit();
+                                ControlFlow::Break
+                            } else {
+                                ControlFlow::Continue
+                            }
                         }
-                    }
-                })
-                .unwrap();
-            }
-        });
-
-        self.server.connect_client_connected({
-            let main_loop = self.main_loop.clone();
-            move |_, client| {
-                client.connect_closed({
-                    let main_loop = main_loop.clone();
-                    move |_| {
-                        main_loop.quit();
-                    }
-                });
+                    })
+                    .unwrap();
+                bus_watches.lock().unwrap().push(bus_watch);
             }
         });
 
@@ -217,7 +216,8 @@ impl StreamServer {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let worker_thread = self.worker_thread
+        let worker_thread = self
+            .worker_thread
             .take()
             .expect("Either run() was called twice, or run() was called before start()");
         worker_thread
