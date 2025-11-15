@@ -34,7 +34,10 @@
         src = craneLib.cleanCargoSource ./.;
 
         inputs = {
-          nativeBuildInputs = with pkgs; [ pkg-config ];
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            makeWrapper
+          ];
 
           buildInputs =
             with pkgs;
@@ -70,6 +73,11 @@
           commonArgs
           // {
             inherit cargoArtifacts;
+
+            postInstall = ''
+              wrapProgram $out/bin/desktopcast \
+                --prefix GST_PLUGIN_SYSTEM_PATH_1_0 : "$GST_PLUGIN_SYSTEM_PATH_1_0"
+            '';
           }
         );
       in
